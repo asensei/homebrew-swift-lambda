@@ -1,0 +1,181 @@
+#!/bin/bash
+
+ProgName=$(basename $0)
+
+swift_lambda_env=".swift-lambda.env"
+swift_lambda_workdir=".swift-lambda"
+swift_lambda_build_path="${swift_lambda_workdir}/build"
+swift_lambda_bin_path="${swift_lambda_workdir}/bin"
+swift_lambda_lib_path="${swift_lambda_workdir}/lib"
+swift_lambda_cp_swift_deps="${swift_lambda_workdir}/cp_swift_deps"
+swift_lambda_bootstrap="${swift_lambda_workdir}/bootstrap"
+
+sub_help(){
+    echo "Usage: $ProgName <subcommand> [options]"
+    echo "Subcommands:"
+    echo "    init      Initialize a new function"
+    echo "    run       Invokes the function"
+    echo "    archive   Build and archive the function for deployment"
+    echo "    version   Print version information and exit"
+    echo ""
+    echo "For help with each subcommand run:"
+    echo "$ProgName <subcommand> -h|--help"
+    echo ""
+}
+
+sub_init(){
+  case $1 in
+    "" | "-h" | "--help")
+        echo "Usage: $ProgName init [ARGS...]"
+        echo "Arguments:"
+        echo "    name  Provide custom function name"
+        echo ""
+        ;;
+    *)
+
+        if [ -d ${1} ]; then
+          echo "A directory named ${1} already exists."
+          exit 1;
+        fi
+
+        mkdir -p ${1}
+        swift package --package-path ${1} init --name ${1} --type executable
+
+        # Package.swift template
+        package_path=${1}/Package.swift
+        package_dependency_template='// .package(url: /\* package url \*/, from: "1.0.0"),'
+        package_dependency='.package(url: "https://github.com/tonisuter/aws-lambda-swift.git", from: "0.1.0")'
+        sed -i '' "s|${package_dependency_template}|${package_dependency}|" ${package_path}
+
+        package_dependency_template='dependencies: \[\]),'
+        package_dependency='dependencies: \["AWSLambdaSwift"\]),'
+        sed -i '' "s|${package_dependency_template}|${package_dependency}|" ${package_path}
+
+        # main.swift template
+        cat << EOF > ${1}/Sources/${1}/main.swift
+import AWSLambdaSwift
+
+func handler(input: JSONDictionary, context: Context) throws -> JSONDictionary {
+  return ["status": 200]
+}
+
+let runtime = try Runtime()
+runtime.registerLambda("handler", handlerFunction: handler)
+try runtime.start()
+
+EOF
+
+        # .swift-lambda template
+        cat << EOF > ${1}/${swift_lambda_env}
+SWIFT_LAMBDA_EXECUTABLE=${1}
+SWIFT_LAMBDA_BUILD_DOCKER_IMAGE="swift:5.0"
+SWIFT_LAMBDA_BUILD_OPTIONS="-c release"
+
+EOF
+
+  esac
+}
+
+sub_run(){
+  exit 1;
+}
+
+build(){
+
+  if [ ! -f Package.swift ]; then
+    echo "Manifest Package.swift not found. Please run swift-lambda from your project's root directory."
+    exit 1;
+  fi
+
+  echo "Using [${swift_lambda_env}] configuration:"
+
+  set -o allexport
+  source ${swift_lambda_env}
+  set +o allexport
+
+  echo "SWIFT_LAMBDA_EXECUTABLE=${SWIFT_LAMBDA_EXECUTABLE}"
+  echo "SWIFT_LAMBDA_BUILD_DOCKER_IMAGE=${SWIFT_LAMBDA_BUILD_DOCKER_IMAGE}"
+  echo "SWIFT_LAMBDA_BUILD_OPTIONS=${SWIFT_LAMBDA_BUILD_OPTIONS}"
+
+  rm -rf ${swift_lambda_bin_path}
+  rm -rf ${swift_lambda_lib_path}
+  mkdir -p ${swift_lambda_bin_path}
+  mkdir -p ${swift_lambda_lib_path}
+
+  # cp_swift_deps
+  cat << EOF > ${swift_lambda_cp_swift_deps}
+#!/bin/bash
+BIN="\${1}"
+OUTPUT="\${2}"
+DEPS=\$(ldd \$BIN | awk 'BEGIN{ORS=" "}\$1\
+  ~/^\//{print \$1}\$3~/^\//{print \$3}'\
+  | sed 's/,\$/\n/')
+
+cp \$DEPS \$OUTPUT
+
+EOF
+
+  # bootstrap
+  cat << EOF > ${swift_lambda_bootstrap}
+#!/bin/sh
+EXECUTABLE=\$LAMBDA_TASK_ROOT/bin/"\$(echo \$_HANDLER | cut -d. -f1)"
+/var/task/lib/ld-linux-x86-64.so.2 --library-path /var/task/lib \${EXECUTABLE}
+
+EOF
+
+  chmod +x ${swift_lambda_cp_swift_deps}
+  chmod +x ${swift_lambda_bootstrap}
+
+  docker run --rm -v $(pwd):/app --workdir /app ${SWIFT_LAMBDA_BUILD_DOCKER_IMAGE} bash -c \
+		"swift build --build-path ${swift_lambda_build_path} ${SWIFT_LAMBDA_BUILD_OPTIONS} \
+			&& cp ${swift_lambda_build_path}/release/${SWIFT_LAMBDA_EXECUTABLE} /app/${swift_lambda_bin_path}/${SWIFT_LAMBDA_EXECUTABLE} \
+			&& /app/${swift_lambda_cp_swift_deps} /app/${swift_lambda_bin_path}/${SWIFT_LAMBDA_EXECUTABLE} ${swift_lambda_lib_path}"
+}
+
+sub_archive(){
+  build
+  rm -rf "${SWIFT_LAMBDA_EXECUTABLE}.zip"
+  cd ${swift_lambda_workdir}
+  zip -r ../${SWIFT_LAMBDA_EXECUTABLE} bootstrap bin lib
+  cd ..
+}
+
+sub_run(){
+  case $1 in
+    "" | "-h" | "--help")
+        echo "Usage: $ProgName run [ARGS...]"
+        echo "Arguments:"
+        echo "    event   Lambda function input event [example: '{\"some\": \"event\"}']"
+        echo ""
+        ;;
+    *)
+
+        build
+        docker run \
+          --rm \
+          -v $(pwd)/${swift_lambda_workdir}:/var/task \
+          lambci/lambda:provided \
+          ${SWIFT_LAMBDA_EXECUTABLE}.handler $1
+
+  esac
+}
+
+sub_version(){
+  echo "Swift-lambda version 0.1.0"
+}
+
+subcommand=$1
+case $subcommand in
+    "" | "-h" | "--help")
+        sub_help
+        ;;
+    *)
+        shift
+        sub_${subcommand} $@
+        if [ $? = 127 ]; then
+            echo "Error: '$subcommand' is not a known subcommand." >&2
+            echo "       Run '$ProgName --help' for a list of known subcommands." >&2
+            exit 1
+        fi
+        ;;
+esac
