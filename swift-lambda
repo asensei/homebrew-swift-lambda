@@ -76,10 +76,6 @@ EOF
   esac
 }
 
-sub_run(){
-  exit 1;
-}
-
 build(){
 
   if [ ! -f Package.swift ]; then
