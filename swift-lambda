@@ -69,6 +69,7 @@ EOF
         cat << EOF > ${1}/${swift_lambda_env}
 SWIFT_LAMBDA_EXECUTABLE=${1}
 SWIFT_LAMBDA_BUILD_DOCKER_IMAGE="swift:5.0"
+SWIFT_LAMBDA_PRE_BUILD_OPTIONS=""
 SWIFT_LAMBDA_BUILD_OPTIONS="-c release"
 
 EOF
@@ -91,6 +92,7 @@ build(){
 
   echo "SWIFT_LAMBDA_EXECUTABLE=${SWIFT_LAMBDA_EXECUTABLE}"
   echo "SWIFT_LAMBDA_BUILD_DOCKER_IMAGE=${SWIFT_LAMBDA_BUILD_DOCKER_IMAGE}"
+  echo "SWIFT_LAMBDA_PRE_BUILD_OPTIONS=${SWIFT_LAMBDA_PRE_BUILD_OPTIONS}"
   echo "SWIFT_LAMBDA_BUILD_OPTIONS=${SWIFT_LAMBDA_BUILD_OPTIONS}"
 
   rm -rf ${swift_lambda_bin_path}
@@ -122,8 +124,14 @@ EOF
   chmod +x ${swift_lambda_cp_swift_deps}
   chmod +x ${swift_lambda_bootstrap}
 
+  if [ -z "${SWIFT_LAMBDA_PRE_BUILD_OPTIONS}" ]; then
+    swift_lambda_build_cmd="swift build"
+  else
+    swift_lambda_build_cmd="${SWIFT_LAMBDA_PRE_BUILD_OPTIONS} && swift build"
+  fi
+
   docker run --rm -v $(pwd):/app --workdir /app ${SWIFT_LAMBDA_BUILD_DOCKER_IMAGE} bash -c \
-		"swift build --build-path ${swift_lambda_build_path} ${SWIFT_LAMBDA_BUILD_OPTIONS} \
+		"${swift_lambda_build_cmd} --build-path ${swift_lambda_build_path} ${SWIFT_LAMBDA_BUILD_OPTIONS} \
 			&& cp ${swift_lambda_build_path}/release/${SWIFT_LAMBDA_EXECUTABLE} /app/${swift_lambda_bin_path}/${SWIFT_LAMBDA_EXECUTABLE} \
 			&& /app/${swift_lambda_cp_swift_deps} /app/${swift_lambda_bin_path}/${SWIFT_LAMBDA_EXECUTABLE} ${swift_lambda_lib_path}"
 }
@@ -157,7 +165,7 @@ sub_run(){
 }
 
 sub_version(){
-  echo "Swift-lambda version 0.1.0"
+  echo "Swift-lambda version 0.2.0"
 }
 
 subcommand=$1
